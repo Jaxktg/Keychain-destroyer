@@ -2,10 +2,10 @@
 #import <UIKit/UIKit.h>
 #import <Security/Security.h>
 #import <substrate.h>
+#import <objc/runtime.h>
 
 @interface KeychainDeletionButton : UIButton
-+ (void)showFloatingButtonInView:(UIView *)parentView;
-+ (BOOL)isButtonAlreadyPresent:(UIView *)parentView;
++ (void)showFloatingButton;
 - (void)deleteKeychainItems;
 @end
 
@@ -13,22 +13,41 @@
     CGRect _safeArea;
 }
 
-+ (BOOL)isButtonAlreadyPresent:(UIView *)parentView {
-    for (UIView *subview in parentView.subviews) {
-        if ([subview isKindOfClass:[KeychainDeletionButton class]]) {
-            return YES;
-        }
-    }
-    return NO;
-}
++ (void)showFloatingButton {
+    UIWindow *keyWindow = nil;
 
-+ (void)showFloatingButtonInView:(UIView *)parentView {
-    // Check if button already exists
-    if ([self isButtonAlreadyPresent:parentView]) {
+    if (@available(iOS 13.0, *)) {
+        NSSet *connectedScenes = [UIApplication sharedApplication].connectedScenes;
+        for (UIScene *scene in connectedScenes) {
+            if ([scene isKindOfClass:[UIWindowScene class]]) {
+                UIWindowScene *windowScene = (UIWindowScene *)scene;
+                for (UIWindow *window in windowScene.windows) {
+                    if (window.isKeyWindow) {
+                        keyWindow = window;
+                        break;
+                    }
+                }
+                if (keyWindow) {
+                    break;
+                }
+            }
+        }
+    } else {
+        keyWindow = [UIApplication sharedApplication].keyWindow;
+    }
+
+    if (!keyWindow) {
         return;
     }
 
-    KeychainDeletionButton *floatingButton = [KeychainDeletionButton buttonWithType:UIButtonTypeCustom];
+    // Use associated object to check if the button is already added
+    KeychainDeletionButton *floatingButton = objc_getAssociatedObject(keyWindow, @selector(showFloatingButton));
+
+    if (floatingButton) {
+        return;
+    }
+
+    floatingButton = [KeychainDeletionButton buttonWithType:UIButtonTypeCustom];
 
     // Button styling
     floatingButton.backgroundColor = [UIColor blackColor];
@@ -43,14 +62,14 @@
     // Calculate safe area insets
     UIEdgeInsets safeAreaInsets = UIEdgeInsetsZero;
     if (@available(iOS 11.0, *)) {
-        safeAreaInsets = parentView.safeAreaInsets;
+        safeAreaInsets = keyWindow.safeAreaInsets;
     }
 
     // Position button in bottom right of safe area
     CGFloat buttonSize = 60;
     floatingButton.frame = CGRectMake(
-        parentView.frame.size.width - buttonSize - 10 - safeAreaInsets.right,
-        parentView.frame.size.height - buttonSize - 10 - safeAreaInsets.bottom,
+        keyWindow.frame.size.width - buttonSize - 10 - safeAreaInsets.right,
+        keyWindow.frame.size.height - buttonSize - 10 - safeAreaInsets.bottom,
         buttonSize,
         buttonSize
     );
@@ -59,8 +78,8 @@
     floatingButton->_safeArea = CGRectMake(
         safeAreaInsets.left,
         safeAreaInsets.top,
-        parentView.frame.size.width - buttonSize - safeAreaInsets.left - safeAreaInsets.right,
-        parentView.frame.size.height - buttonSize - safeAreaInsets.top - safeAreaInsets.bottom
+        keyWindow.frame.size.width - buttonSize - safeAreaInsets.left - safeAreaInsets.right,
+        keyWindow.frame.size.height - buttonSize - safeAreaInsets.top - safeAreaInsets.bottom
     );
 
     // Button icon using SF Symbol with version check
@@ -82,7 +101,7 @@
 
     // Add target actions for state management
     [floatingButton addTarget:floatingButton action:@selector(buttonPressed) forControlEvents:UIControlEventTouchDown];
-    [floatingButton addTarget:floatingButton action:@selector(buttonReleased) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside];
+    [floatingButton addTarget:floatingButton action:@selector(buttonReleased) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel | UIControlEventTouchDragExit | UIControlEventTouchDragOutside];
 
     [floatingButton addTarget:floatingButton
                        action:@selector(buttonTapped:)
@@ -94,7 +113,16 @@
         action:@selector(handlePan:)];
     [floatingButton addGestureRecognizer:panRecognizer];
 
-    [parentView addSubview:floatingButton];
+    // Add long-press gesture recognizer for author info
+    UILongPressGestureRecognizer *longPressRecognizer = [[UILongPressGestureRecognizer alloc]
+        initWithTarget:floatingButton
+        action:@selector(showAuthorInfo:)];
+    [floatingButton addGestureRecognizer:longPressRecognizer];
+
+    [keyWindow addSubview:floatingButton];
+
+    // Associate the button with the key window to prevent duplicates
+    objc_setAssociatedObject(keyWindow, @selector(showFloatingButton), floatingButton, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
 - (void)buttonPressed {
@@ -148,6 +176,11 @@
 }
 
 - (void)handlePan:(UIPanGestureRecognizer *)recognizer {
+    if (recognizer.state == UIGestureRecognizerStateBegan) {
+        // Reset button appearance when dragging begins
+        [self buttonReleased];
+    }
+
     CGPoint translation = [recognizer translationInView:self.superview];
     CGPoint newCenter = CGPointMake(
         recognizer.view.center.x + translation.x,
@@ -155,11 +188,40 @@
     );
 
     // Constrain to safe area
-    newCenter.x = MAX(CGRectGetMinX(_safeArea), MIN(newCenter.x, CGRectGetMaxX(_safeArea)));
-    newCenter.y = MAX(CGRectGetMinY(_safeArea), MIN(newCenter.y, CGRectGetMaxY(_safeArea)));
+    CGFloat halfWidth = self.bounds.size.width / 2;
+    CGFloat halfHeight = self.bounds.size.height / 2;
+
+    newCenter.x = MAX(CGRectGetMinX(_safeArea) + halfWidth,
+                      MIN(newCenter.x, CGRectGetMaxX(_safeArea) + halfWidth));
+    newCenter.y = MAX(CGRectGetMinY(_safeArea) + halfHeight,
+                      MIN(newCenter.y, CGRectGetMaxY(_safeArea) + halfHeight));
 
     recognizer.view.center = newCenter;
     [recognizer setTranslation:CGPointZero inView:self.superview];
+}
+
+- (void)showAuthorInfo:(UILongPressGestureRecognizer *)recognizer {
+    if (recognizer.state == UIGestureRecognizerStateBegan) {
+        // Show author info
+        UIAlertController *alertController = [UIAlertController
+            alertControllerWithTitle:@"Author Info"
+            message:@"Name: Jaxktg\nRepo: https://github.com/Jaxktg/Keychain-destroyer\nMIT license"
+            preferredStyle:UIAlertControllerStyleAlert];
+
+        UIAlertAction *okAction = [UIAlertAction
+            actionWithTitle:@"OK"
+            style:UIAlertActionStyleDefault
+            handler:nil];
+
+        [alertController addAction:okAction];
+
+        // Present the alert from the top view controller
+        UIViewController *topViewController = [UIApplication sharedApplication].keyWindow.rootViewController;
+        while (topViewController.presentedViewController) {
+            topViewController = topViewController.presentedViewController;
+        }
+        [topViewController presentViewController:alertController animated:YES completion:nil];
+    }
 }
 
 - (void)deleteKeychainItems {
@@ -173,7 +235,7 @@
 
     for (id secClass in secClasses) {
         NSMutableDictionary *query = [NSMutableDictionary dictionaryWithObjectsAndKeys:
-            secClass, kSecClass,
+            secClass, (__bridge id)kSecClass,
             nil];
 
         OSStatus status = SecItemDelete((__bridge CFDictionaryRef)query);
@@ -196,14 +258,11 @@
 
 %hook UIViewController
 
-// Hook into viewDidAppear to add the floating button
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
 
-    // Only add button to main app's root view controller
-    if (self.view.window.rootViewController == self) {
-        [KeychainDeletionButton showFloatingButtonInView:self.view];
-    }
+    // Ensure the button is added only once
+    [KeychainDeletionButton showFloatingButton];
 }
 
 %end
